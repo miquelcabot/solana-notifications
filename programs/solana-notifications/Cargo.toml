@@ -22,10 +22,10 @@ test-sbf = []
 
 [dependencies]
 anchor-lang = "0.32.1"
+k256 = { version = "0.13", default-features = false, features = ["arithmetic"] }
 
 [dev-dependencies]
 mollusk-svm = "~0.4"
-
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
