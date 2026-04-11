@@ -17,8 +17,8 @@ use k256::{
     elliptic_curve::{ops::MulByGenerator, sec1::ToEncodedPoint, ScalarPrimitive},
     ProjectivePoint, Scalar,
 };
-use mollusk_svm::{program::keyed_account_for_system_program, Mollusk};
 use mollusk_svm::result::ProgramResult;
+use mollusk_svm::{program::keyed_account_for_system_program, Mollusk};
 use solana_account::Account;
 use solana_notifications::{accounts, instruction, DELIVERY_DEPOSIT};
 
@@ -538,7 +538,8 @@ fn bench_full_delivery_flow() {
         program_id,
         &instruction::CreateDelivery {
             receivers: vec![receiver],
-            vx, vy,
+            vx,
+            vy,
             encrypted_message_hash: vec![0u8; 32],
             a: vec![1u8; 64],
             term1: 3600,
@@ -566,10 +567,18 @@ fn bench_full_delivery_flow() {
     assert_ok(&r1.program_result, "create_delivery");
     let cu_create = r1.compute_units_consumed;
 
-    let delivery_after_create = r1.resulting_accounts.iter()
-        .find(|(k, _)| *k == delivery_key).map(|(_, a)| a.clone()).unwrap();
-    let vault_after_create = r1.resulting_accounts.iter()
-        .find(|(k, _)| *k == vault_key).map(|(_, a)| a.clone()).unwrap();
+    let delivery_after_create = r1
+        .resulting_accounts
+        .iter()
+        .find(|(k, _)| *k == delivery_key)
+        .map(|(_, a)| a.clone())
+        .unwrap();
+    let vault_after_create = r1
+        .resulting_accounts
+        .iter()
+        .find(|(k, _)| *k == vault_key)
+        .map(|(_, a)| a.clone())
+        .unwrap();
 
     // ── Step 2: accept ────────────────────────────────────────────────────────
     let accept_ix = Instruction::new_with_bytes(
@@ -577,7 +586,8 @@ fn bench_full_delivery_flow() {
         &instruction::Accept {
             z1: vec![0xAA; 32],
             z2: vec![0xBB; 32],
-            bx, by,
+            bx,
+            by,
             c: c_bytes,
         }
         .data(),
@@ -597,8 +607,12 @@ fn bench_full_delivery_flow() {
     assert_ok(&r2.program_result, "accept");
     let cu_accept = r2.compute_units_consumed;
 
-    let delivery_after_accept = r2.resulting_accounts.iter()
-        .find(|(k, _)| *k == delivery_key).map(|(_, a)| a.clone()).unwrap();
+    let delivery_after_accept = r2
+        .resulting_accounts
+        .iter()
+        .find(|(k, _)| *k == delivery_key)
+        .map(|(_, a)| a.clone())
+        .unwrap();
 
     // ── Step 3: finish ────────────────────────────────────────────────────────
     let finish_ix = Instruction::new_with_bytes(
@@ -629,13 +643,23 @@ fn bench_full_delivery_flow() {
     println!("\n╔══════════════════════════════════════════════════╗");
     println!("║  Full delivery flow  (1 receiver, happy path)   ║");
     println!("╠══════════════════════════════════════════════════╣");
-    println!("║  create_delivery  {:>10} CU                  ║", cu_create);
-    println!("║  accept           {:>10} CU                  ║", cu_accept);
-    println!("║  finish           {:>10} CU  (secp256k1)     ║", cu_finish);
+    println!(
+        "║  create_delivery  {:>10} CU                  ║",
+        cu_create
+    );
+    println!(
+        "║  accept           {:>10} CU                  ║",
+        cu_accept
+    );
+    println!(
+        "║  finish           {:>10} CU  (secp256k1)     ║",
+        cu_finish
+    );
     println!("╠══════════════════════════════════════════════════╣");
     println!("║  TOTAL            {:>10} CU  (3 txns)        ║", cu_total);
     println!("╚══════════════════════════════════════════════════╝");
-    println!("  SOL deposit locked/released: {} lamports ({:.4} SOL)",
+    println!(
+        "  SOL deposit locked/released: {} lamports ({:.4} SOL)",
         DELIVERY_DEPOSIT,
         DELIVERY_DEPOSIT as f64 / 1_000_000_000.0
     );
