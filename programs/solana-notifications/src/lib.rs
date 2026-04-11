@@ -42,7 +42,10 @@ pub mod solana_notifications {
             !receivers.is_empty() && receivers.len() <= MAX_RECEIVERS,
             SolanaNotificationsError::InvalidReceiversCount
         );
-        require!(term1 > 0 && term1 < term2, SolanaNotificationsError::InvalidTerms);
+        require!(
+            term1 > 0 && term1 < term2,
+            SolanaNotificationsError::InvalidTerms
+        );
         require!(
             encrypted_message_hash.len() <= MAX_ENCRYPTED_HASH_SIZE,
             SolanaNotificationsError::InvalidEncryptedHash
@@ -94,7 +97,11 @@ pub mod solana_notifications {
         emit!(DeliveryCreated {
             delivery: delivery.key(),
             sender: delivery.sender,
-            receivers: delivery.receiver_states.iter().map(|rs| rs.receiver).collect(),
+            receivers: delivery
+                .receiver_states
+                .iter()
+                .map(|rs| rs.receiver)
+                .collect(),
             start: delivery.start,
             term1: delivery.term1,
             term2: delivery.term2,
@@ -179,14 +186,16 @@ pub mod solana_notifications {
         {
             let delivery = &ctx.accounts.delivery;
 
-            let all_accepted =
-                delivery.accepted_receivers == delivery.receiver_states.len() as u32;
+            let all_accepted = delivery.accepted_receivers == delivery.receiver_states.len() as u32;
             let time_passed = clock.unix_timestamp >= delivery.start + delivery.term1;
             require!(
                 all_accepted || time_passed,
                 SolanaNotificationsError::FinishConditionsNotMet
             );
-            require!(!delivery.finished, SolanaNotificationsError::AlreadyFinished);
+            require!(
+                !delivery.finished,
+                SolanaNotificationsError::AlreadyFinished
+            );
 
             // If any receiver accepted, verify the cryptographic proof for that receiver.
             if let Some(accepted) = delivery
@@ -286,15 +295,27 @@ pub mod solana_notifications {
 
 // ===================== Cryptographic Verification =====================
 
-/// Verifies `V == G·r + B·c` on the secp256k1 curve.
+/// Verifies `V == G·r + B·c` on the secp256k1 curve using Solana's native
+/// `secp256k1_recover` syscall instead of software EC arithmetic.
 ///
-/// - `V = (vx, vy)`: sender's commitment point.
-/// - `B = (bx, by)`: receiver's EC point submitted during acceptance.
-/// - `c`: challenge scalar submitted by the receiver.
-/// - `r`: response scalar revealed by the sender at finish time.
+/// **Why secp256k1_recover instead of k256 EC arithmetic?**
+/// Software EC point multiplication in BPF costs >1.4 M compute units (the
+/// per-transaction maximum).  The `secp256k1_recover` syscall runs native C
+/// code and costs only ~25 000 CU.
 ///
-/// The equation holds when `r = v - b·c` (i.e., `V = G·v`, `B = G·b`),
-/// which proves the sender knows the discrete log `v` of `V`.
+/// **Reformulation** — secp256k1_recover computes:
+///   `Q = r_sig⁻¹ · (s · R − hash · G)`
+/// where R is the curve point whose x-coordinate equals r_sig.
+///
+/// Setting `R = B` (recovery_id selects the matching y), `r_sig = B.x`,
+/// `hash = −r·B.x mod n`, `s = c·B.x mod n`:
+///   `Q = B.x⁻¹ · (c·B.x · B − (−r·B.x) · G)`
+///      = `c · B + r · G`
+///      = `G·r + B·c`
+///
+/// So we check that `secp256k1_recover(hash, rec_id, B.x ‖ s) == V`.
+/// All intermediate values are **scalar field multiplications** (cheap integer
+/// arithmetic in Z_n), not EC point operations.
 fn verify_cryptographic_proof(
     vx: [u8; 32],
     vy: [u8; 32],
@@ -303,19 +324,34 @@ fn verify_cryptographic_proof(
     c: [u8; 32],
     r: [u8; 32],
 ) -> Result<()> {
-    use k256::{elliptic_curve::ops::MulByGenerator, ProjectivePoint};
+    use solana_secp256k1_recover::secp256k1_recover;
 
-    let r_scalar = bytes_to_scalar(&r)?;
+    let resp     = bytes_to_scalar(&r)?;
     let c_scalar = bytes_to_scalar(&c)?;
+    let bx_scalar = bytes_to_scalar(&bx)?;
 
-    let b_point = bytes_to_projective_point(&bx, &by)?;
-    let v_point = bytes_to_projective_point(&vx, &vy)?;
+    // hash = −r · B.x mod n  (scalar multiplication, no EC operations)
+    let hash_scalar = -(resp * bx_scalar);
+    let hash_bytes: [u8; 32] = hash_scalar.to_bytes().into();
 
-    // Compute G·r + B·c
-    let computed = ProjectivePoint::mul_by_generator(&r_scalar) + b_point * c_scalar;
+    // s = c · B.x mod n
+    let s_bytes: [u8; 32] = (c_scalar * bx_scalar).to_bytes().into();
 
+    // signature = r_sig (32 B) ‖ s_sig (32 B)
+    let mut signature = [0u8; 64];
+    signature[..32].copy_from_slice(&bx);   // r_sig = B.x
+    signature[32..].copy_from_slice(&s_bytes);
+
+    // recovery_id: 0 = even y, 1 = odd y (least-significant bit of B.y)
+    let recovery_id = by[31] & 1;
+
+    let recovered = secp256k1_recover(&hash_bytes, recovery_id, &signature)
+        .map_err(|_| error!(SolanaNotificationsError::VAndGxRiPlusBiXCiNotEqual))?;
+
+    // secp256k1_recover returns 64 bytes: x (32) ‖ y (32), no 0x04 prefix
+    let rec = recovered.to_bytes();
     require!(
-        computed == v_point,
+        rec[..32] == vx && rec[32..] == vy,
         SolanaNotificationsError::VAndGxRiPlusBiXCiNotEqual
     );
 
@@ -327,24 +363,6 @@ fn bytes_to_scalar(bytes: &[u8; 32]) -> Result<k256::Scalar> {
     let prim = ScalarPrimitive::from_slice(bytes)
         .map_err(|_| error!(SolanaNotificationsError::InvalidScalar))?;
     Ok(k256::Scalar::from(prim))
-}
-
-fn bytes_to_projective_point(x: &[u8; 32], y: &[u8; 32]) -> Result<k256::ProjectivePoint> {
-    use k256::elliptic_curve::sec1::FromEncodedPoint;
-    // Uncompressed SEC1 encoding: 0x04 || x || y
-    let mut sec1 = [0u8; 65];
-    sec1[0] = 0x04;
-    sec1[1..33].copy_from_slice(x);
-    sec1[33..65].copy_from_slice(y);
-
-    let encoded = k256::EncodedPoint::from_bytes(&sec1)
-        .map_err(|_| error!(SolanaNotificationsError::InvalidPoint))?;
-
-    let affine = k256::AffinePoint::from_encoded_point(&encoded)
-        .into_option()
-        .ok_or(error!(SolanaNotificationsError::InvalidPoint))?;
-
-    Ok(k256::ProjectivePoint::from(affine))
 }
 
 // ===================== Account Structures =====================
@@ -379,7 +397,7 @@ impl ReceiverState {
         + (4 + MAX_Z1_SIZE)                         // z1
         + (4 + MAX_Z2_SIZE)                         // z2
         + 32 + 32 + 32 + 32                         // bx, by, c, r
-        + 1;                                        // state  →  937 bytes
+        + 1; // state  →  937 bytes
 }
 
 /// Main delivery account (PDA).
@@ -414,7 +432,7 @@ impl Delivery {
         + 8 + 8 + 8                                             // start, term1, term2
         + 4                                                     // accepted_receivers
         + 1 + 1 + 1                                             // finished, bump, vault_bump
-        + 8;                                                    // nonce  →  ≈9845 bytes
+        + 8; // nonce  →  ≈9845 bytes
 }
 
 // ===================== Instruction Contexts =====================
@@ -553,7 +571,9 @@ pub enum SolanaNotificationsError {
     ReceiverNotFound,
     #[msg("Invalid state for this operation")]
     InvalidState,
-    #[msg("Finish conditions not met: all receivers must have accepted or term1 must have elapsed")]
+    #[msg(
+        "Finish conditions not met: all receivers must have accepted or term1 must have elapsed"
+    )]
     FinishConditionsNotMet,
     #[msg("Delivery is already finished")]
     AlreadyFinished,
