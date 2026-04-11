@@ -80,15 +80,21 @@ fn test_wrong_r_fails_identity() {
     let computed_correct = ProjectivePoint::mul_by_generator(&r_correct) + b_point * c;
     let computed_wrong = ProjectivePoint::mul_by_generator(&r_wrong) + b_point * c;
 
-    assert_eq!(computed_correct, v_point, "correct r must satisfy the equation");
-    assert_ne!(computed_wrong, v_point, "wrong r must NOT satisfy the equation");
+    assert_eq!(
+        computed_correct, v_point,
+        "correct r must satisfy the equation"
+    );
+    assert_ne!(
+        computed_wrong, v_point,
+        "wrong r must NOT satisfy the equation"
+    );
 }
 
 /// Verifies that serialising a worst-case ReceiverState fits within MAX_SIZE.
 #[test]
 fn test_receiver_state_max_size_is_sufficient() {
-    use anchor_lang::AnchorSerialize;
     use anchor_lang::prelude::Pubkey;
+    use anchor_lang::AnchorSerialize;
 
     let rs = ReceiverState {
         receiver: Pubkey::new_unique(),
@@ -115,7 +121,10 @@ fn test_term_validation_logic() {
     // These are the conditions checked in create_delivery
     let valid_cases = [(1i64, 2i64), (3600, 7200), (60, 86400)];
     for (term1, term2) in valid_cases {
-        assert!(term1 > 0 && term1 < term2, "expected valid: term1={term1} term2={term2}");
+        assert!(
+            term1 > 0 && term1 < term2,
+            "expected valid: term1={term1} term2={term2}"
+        );
     }
 
     let invalid_cases = [(0i64, 100i64), (7200, 3600), (100, 100), (-1, 100)];
@@ -196,10 +205,7 @@ mod bpf_tests {
     use solana_notifications::{accounts, instruction};
 
     fn delivery_pda(program_id: &Pubkey, sender: &Pubkey, nonce: &[u8; 8]) -> (Pubkey, u8) {
-        Pubkey::find_program_address(
-            &[b"delivery", sender.as_ref(), nonce.as_ref()],
-            program_id,
-        )
+        Pubkey::find_program_address(&[b"delivery", sender.as_ref(), nonce.as_ref()], program_id)
     }
 
     fn vault_pda(program_id: &Pubkey, delivery: &Pubkey) -> (Pubkey, u8) {
@@ -246,7 +252,10 @@ mod bpf_tests {
 
         mollusk.process_and_validate_instruction(
             &instruction,
-            &[(sender, mollusk_svm::program::keyed_account_for_system_program())],
+            &[(
+                sender,
+                mollusk_svm::program::keyed_account_for_system_program(),
+            )],
             &[Check::success()],
         );
     }
@@ -287,7 +296,10 @@ mod bpf_tests {
 
         mollusk.process_and_validate_instruction(
             &instruction,
-            &[(sender, mollusk_svm::program::keyed_account_for_system_program())],
+            &[(
+                sender,
+                mollusk_svm::program::keyed_account_for_system_program(),
+            )],
             &[Check::err(
                 anchor_lang::error::ErrorCode::from(
                     solana_notifications::SolanaNotificationsError::InvalidTerms,
@@ -332,7 +344,10 @@ mod bpf_tests {
 
         mollusk.process_and_validate_instruction(
             &instruction,
-            &[(sender, mollusk_svm::program::keyed_account_for_system_program())],
+            &[(
+                sender,
+                mollusk_svm::program::keyed_account_for_system_program(),
+            )],
             &[Check::err(
                 anchor_lang::error::ErrorCode::from(
                     solana_notifications::SolanaNotificationsError::InvalidReceiversCount,
