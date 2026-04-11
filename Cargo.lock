@@ -3101,6 +3101,8 @@ dependencies = [
  "anchor-lang",
  "k256",
  "mollusk-svm",
+ "solana-account",
+ "solana-secp256k1-recover",
 ]
 
 [[package]]
