@@ -326,7 +326,7 @@ fn verify_cryptographic_proof(
 ) -> Result<()> {
     use solana_secp256k1_recover::secp256k1_recover;
 
-    let resp     = bytes_to_scalar(&r)?;
+    let resp = bytes_to_scalar(&r)?;
     let c_scalar = bytes_to_scalar(&c)?;
     let bx_scalar = bytes_to_scalar(&bx)?;
 
@@ -339,7 +339,7 @@ fn verify_cryptographic_proof(
 
     // signature = r_sig (32 B) ‖ s_sig (32 B)
     let mut signature = [0u8; 64];
-    signature[..32].copy_from_slice(&bx);   // r_sig = B.x
+    signature[..32].copy_from_slice(&bx); // r_sig = B.x
     signature[32..].copy_from_slice(&s_bytes);
 
     // recovery_id: 0 = even y, 1 = odd y (least-significant bit of B.y)
