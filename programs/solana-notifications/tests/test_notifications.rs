@@ -196,13 +196,30 @@ fn test_finish_crypto_values_are_correct() {
 
 #[cfg(feature = "test-sbf")]
 mod bpf_tests {
-    use super::*;
     use anchor_lang::{
         solana_program::{instruction::Instruction, pubkey::Pubkey, system_program},
-        InstructionData, ToAccountMetas,
+        AccountDeserialize, InstructionData, ToAccountMetas,
     };
-    use mollusk_svm::{result::Check, Mollusk};
-    use solana_notifications::{accounts, instruction};
+    use k256::{elliptic_curve::ops::MulByGenerator, ProjectivePoint};
+    use mollusk_svm::{program::keyed_account_for_system_program, result::Check, Mollusk};
+    use solana_account::Account;
+    use solana_notifications::{accounts, instruction, Delivery, State, DELIVERY_DEPOSIT};
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    fn funded(lamports: u64) -> Account {
+        Account {
+            lamports,
+            owner: system_program::id(),
+            ..Default::default()
+        }
+    }
+
+    /// Converts an Anchor `#[error_code]` variant into the `ProgramError`
+    /// that Mollusk's `Check::err` expects (via `.into()`).
+    fn anchor_error(e: impl Into<anchor_lang::error::Error>) -> anchor_lang::prelude::ProgramError {
+        e.into().into()
+    }
 
     fn delivery_pda(program_id: &Pubkey, sender: &Pubkey, nonce: &[u8; 8]) -> (Pubkey, u8) {
         Pubkey::find_program_address(&[b"delivery", sender.as_ref(), nonce.as_ref()], program_id)
@@ -211,6 +228,34 @@ mod bpf_tests {
     fn vault_pda(program_id: &Pubkey, delivery: &Pubkey) -> (Pubkey, u8) {
         Pubkey::find_program_address(&[b"vault", delivery.as_ref()], program_id)
     }
+
+    fn parse_delivery(result_accounts: &[(Pubkey, Account)], key: Pubkey) -> Delivery {
+        let data = &result_accounts
+            .iter()
+            .find(|(k, _)| *k == key)
+            .expect("delivery account not found")
+            .1
+            .data;
+        Delivery::try_deserialize(&mut data.as_ref()).unwrap()
+    }
+
+    fn get_lamports(result_accounts: &[(Pubkey, Account)], key: Pubkey) -> u64 {
+        result_accounts
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, a)| a.lamports)
+            .unwrap_or(0)
+    }
+
+    fn get_account(result_accounts: &[(Pubkey, Account)], key: Pubkey) -> Account {
+        result_accounts
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, a)| a.clone())
+            .expect("account not found")
+    }
+
+    // ── existing tests (fixed to use funded accounts) ─────────────────────
 
     #[test]
     fn test_create_delivery_should_work() {
@@ -221,41 +266,40 @@ mod bpf_tests {
         let receiver = Pubkey::new_unique();
         let nonce = [1u8; 8];
 
-        let v = make_scalar(42);
-        let v_point = ProjectivePoint::mul_by_generator(&v);
-        let (vx, vy) = point_to_xy(&v_point);
+        let v = super::make_scalar(42);
+        let (vx, vy) = super::point_to_xy(&ProjectivePoint::mul_by_generator(&v));
 
         let (delivery_key, _) = delivery_pda(&program_id, &sender, &nonce);
         let (vault_key, _) = vault_pda(&program_id, &delivery_key);
 
-        let instruction = Instruction::new_with_bytes(
-            program_id,
-            &instruction::CreateDelivery {
-                receivers: vec![receiver],
-                vx,
-                vy,
-                encrypted_message_hash: vec![0u8; 32],
-                a: vec![1u8; 64],
-                term1: 3600,
-                term2: 7200,
-                nonce,
-            }
-            .data(),
-            accounts::CreateDelivery {
-                sender,
-                delivery: delivery_key,
-                vault: vault_key,
-                system_program: system_program::id(),
-            }
-            .to_account_metas(None),
-        );
-
         mollusk.process_and_validate_instruction(
-            &instruction,
-            &[(
-                sender,
-                mollusk_svm::program::keyed_account_for_system_program(),
-            )],
+            &Instruction::new_with_bytes(
+                program_id,
+                &instruction::CreateDelivery {
+                    receivers: vec![receiver],
+                    vx,
+                    vy,
+                    encrypted_message_hash: vec![0u8; 32],
+                    a: vec![1u8; 64],
+                    term1: 3600,
+                    term2: 7200,
+                    nonce,
+                }
+                .data(),
+                accounts::CreateDelivery {
+                    sender,
+                    delivery: delivery_key,
+                    vault: vault_key,
+                    system_program: system_program::id(),
+                }
+                .to_account_metas(None),
+            ),
+            &[
+                (sender, funded(10 * DELIVERY_DEPOSIT)),
+                (delivery_key, Account::default()),
+                (vault_key, Account::default()),
+                keyed_account_for_system_program(),
+            ],
             &[Check::success()],
         );
     }
@@ -272,39 +316,36 @@ mod bpf_tests {
         let (delivery_key, _) = delivery_pda(&program_id, &sender, &nonce);
         let (vault_key, _) = vault_pda(&program_id, &delivery_key);
 
-        let instruction = Instruction::new_with_bytes(
-            program_id,
-            &instruction::CreateDelivery {
-                receivers: vec![receiver],
-                vx: [0u8; 32],
-                vy: [0u8; 32],
-                encrypted_message_hash: vec![],
-                a: vec![],
-                term1: 7200, // term1 >= term2 → must fail
-                term2: 3600,
-                nonce,
-            }
-            .data(),
-            accounts::CreateDelivery {
-                sender,
-                delivery: delivery_key,
-                vault: vault_key,
-                system_program: system_program::id(),
-            }
-            .to_account_metas(None),
-        );
-
         mollusk.process_and_validate_instruction(
-            &instruction,
-            &[(
-                sender,
-                mollusk_svm::program::keyed_account_for_system_program(),
-            )],
+            &Instruction::new_with_bytes(
+                program_id,
+                &instruction::CreateDelivery {
+                    receivers: vec![receiver],
+                    vx: [0u8; 32],
+                    vy: [0u8; 32],
+                    encrypted_message_hash: vec![],
+                    a: vec![],
+                    term1: 7200,
+                    term2: 3600,
+                    nonce,
+                }
+                .data(),
+                accounts::CreateDelivery {
+                    sender,
+                    delivery: delivery_key,
+                    vault: vault_key,
+                    system_program: system_program::id(),
+                }
+                .to_account_metas(None),
+            ),
+            &[
+                (sender, funded(10 * DELIVERY_DEPOSIT)),
+                (delivery_key, Account::default()),
+                (vault_key, Account::default()),
+                keyed_account_for_system_program(),
+            ],
             &[Check::err(
-                anchor_lang::error::ErrorCode::from(
-                    solana_notifications::SolanaNotificationsError::InvalidTerms,
-                )
-                .into(),
+                anchor_error(solana_notifications::SolanaNotificationsError::InvalidTerms).into(),
             )],
         );
     }
@@ -320,20 +361,637 @@ mod bpf_tests {
         let (delivery_key, _) = delivery_pda(&program_id, &sender, &nonce);
         let (vault_key, _) = vault_pda(&program_id, &delivery_key);
 
-        let instruction = Instruction::new_with_bytes(
+        mollusk.process_and_validate_instruction(
+            &Instruction::new_with_bytes(
+                program_id,
+                &instruction::CreateDelivery {
+                    receivers: vec![],
+                    vx: [0u8; 32],
+                    vy: [0u8; 32],
+                    encrypted_message_hash: vec![],
+                    a: vec![],
+                    term1: 3600,
+                    term2: 7200,
+                    nonce,
+                }
+                .data(),
+                accounts::CreateDelivery {
+                    sender,
+                    delivery: delivery_key,
+                    vault: vault_key,
+                    system_program: system_program::id(),
+                }
+                .to_account_metas(None),
+            ),
+            &[
+                (sender, funded(10 * DELIVERY_DEPOSIT)),
+                (delivery_key, Account::default()),
+                (vault_key, Account::default()),
+                keyed_account_for_system_program(),
+            ],
+            &[Check::err(
+                anchor_error(solana_notifications::SolanaNotificationsError::InvalidReceiversCount)
+                    .into(),
+            )],
+        );
+    }
+
+    #[test]
+    fn test_accept_should_work() {
+        let program_id = solana_notifications::id();
+        let mollusk = Mollusk::new(&program_id, "solana_notifications");
+
+        let sender = Pubkey::new_unique();
+        let receiver = Pubkey::new_unique();
+        let nonce = [10u8; 8];
+
+        let v = super::make_scalar(10);
+        let b = super::make_scalar(20);
+        let c = super::make_scalar(30);
+        let (vx, vy) = super::point_to_xy(&ProjectivePoint::mul_by_generator(&v));
+        let (bx, by) = super::point_to_xy(&ProjectivePoint::mul_by_generator(&b));
+        let c_bytes = super::scalar_to_bytes(&c);
+
+        let (delivery_key, _) = delivery_pda(&program_id, &sender, &nonce);
+        let (vault_key, _) = vault_pda(&program_id, &delivery_key);
+
+        let create_result = mollusk.process_instruction(
+            &Instruction::new_with_bytes(
+                program_id,
+                &instruction::CreateDelivery {
+                    receivers: vec![receiver],
+                    vx,
+                    vy,
+                    encrypted_message_hash: vec![0u8; 32],
+                    a: vec![],
+                    term1: 3600,
+                    term2: 7200,
+                    nonce,
+                }
+                .data(),
+                accounts::CreateDelivery {
+                    sender,
+                    delivery: delivery_key,
+                    vault: vault_key,
+                    system_program: system_program::id(),
+                }
+                .to_account_metas(None),
+            ),
+            &[
+                (sender, funded(10 * DELIVERY_DEPOSIT)),
+                (delivery_key, Account::default()),
+                (vault_key, Account::default()),
+                keyed_account_for_system_program(),
+            ],
+        );
+        assert!(!create_result.program_result.is_err(), "create failed");
+
+        let accept_result = mollusk.process_instruction(
+            &Instruction::new_with_bytes(
+                program_id,
+                &instruction::Accept {
+                    z1: vec![0xAA; 32],
+                    z2: vec![0xBB; 32],
+                    bx,
+                    by,
+                    c: c_bytes,
+                }
+                .data(),
+                accounts::AcceptDelivery {
+                    receiver,
+                    delivery: delivery_key,
+                }
+                .to_account_metas(None),
+            ),
+            &[
+                (receiver, funded(DELIVERY_DEPOSIT)),
+                (
+                    delivery_key,
+                    get_account(&create_result.resulting_accounts, delivery_key),
+                ),
+            ],
+        );
+        assert!(!accept_result.program_result.is_err(), "accept failed");
+
+        let delivery = parse_delivery(&accept_result.resulting_accounts, delivery_key);
+        assert_eq!(delivery.receiver_states[0].state, State::Accepted);
+        assert_eq!(delivery.accepted_receivers, 1);
+    }
+
+    #[test]
+    fn test_finish_should_work() {
+        let program_id = solana_notifications::id();
+        let mollusk = Mollusk::new(&program_id, "solana_notifications");
+
+        let sender = Pubkey::new_unique();
+        let receiver = Pubkey::new_unique();
+        let nonce = [11u8; 8];
+
+        let v = super::make_scalar(10);
+        let b = super::make_scalar(20);
+        let c = super::make_scalar(30);
+        let r = super::compute_response(&v, &b, &c);
+        let (vx, vy) = super::point_to_xy(&ProjectivePoint::mul_by_generator(&v));
+        let (bx, by) = super::point_to_xy(&ProjectivePoint::mul_by_generator(&b));
+        let c_bytes = super::scalar_to_bytes(&c);
+        let r_bytes = super::scalar_to_bytes(&r);
+
+        let (delivery_key, _) = delivery_pda(&program_id, &sender, &nonce);
+        let (vault_key, _) = vault_pda(&program_id, &delivery_key);
+
+        let create_result = mollusk.process_instruction(
+            &Instruction::new_with_bytes(
+                program_id,
+                &instruction::CreateDelivery {
+                    receivers: vec![receiver],
+                    vx,
+                    vy,
+                    encrypted_message_hash: vec![0u8; 32],
+                    a: vec![],
+                    term1: 3600,
+                    term2: 7200,
+                    nonce,
+                }
+                .data(),
+                accounts::CreateDelivery {
+                    sender,
+                    delivery: delivery_key,
+                    vault: vault_key,
+                    system_program: system_program::id(),
+                }
+                .to_account_metas(None),
+            ),
+            &[
+                (sender, funded(10 * DELIVERY_DEPOSIT)),
+                (delivery_key, Account::default()),
+                (vault_key, Account::default()),
+                keyed_account_for_system_program(),
+            ],
+        );
+        assert!(!create_result.program_result.is_err(), "create failed");
+
+        let accept_result = mollusk.process_instruction(
+            &Instruction::new_with_bytes(
+                program_id,
+                &instruction::Accept {
+                    z1: vec![0xAA; 32],
+                    z2: vec![0xBB; 32],
+                    bx,
+                    by,
+                    c: c_bytes,
+                }
+                .data(),
+                accounts::AcceptDelivery {
+                    receiver,
+                    delivery: delivery_key,
+                }
+                .to_account_metas(None),
+            ),
+            &[
+                (receiver, funded(DELIVERY_DEPOSIT)),
+                (
+                    delivery_key,
+                    get_account(&create_result.resulting_accounts, delivery_key),
+                ),
+            ],
+        );
+        assert!(!accept_result.program_result.is_err(), "accept failed");
+
+        let finish_result = mollusk.process_instruction(
+            &Instruction::new_with_bytes(
+                program_id,
+                &instruction::Finish { r: r_bytes }.data(),
+                accounts::FinishDelivery {
+                    sender,
+                    delivery: delivery_key,
+                    vault: vault_key,
+                    system_program: system_program::id(),
+                }
+                .to_account_metas(None),
+            ),
+            &[
+                (sender, funded(DELIVERY_DEPOSIT)),
+                (
+                    delivery_key,
+                    get_account(&accept_result.resulting_accounts, delivery_key),
+                ),
+                (
+                    vault_key,
+                    get_account(&create_result.resulting_accounts, vault_key),
+                ),
+                keyed_account_for_system_program(),
+            ],
+        );
+        assert!(!finish_result.program_result.is_err(), "finish failed");
+
+        let delivery = parse_delivery(&finish_result.resulting_accounts, delivery_key);
+        assert!(delivery.finished);
+        assert_eq!(delivery.receiver_states[0].state, State::Finished);
+        assert_eq!(delivery.receiver_states[0].r, r_bytes);
+    }
+
+    #[test]
+    fn test_cancel_should_work() {
+        let program_id = solana_notifications::id();
+        let mut mollusk = Mollusk::new(&program_id, "solana_notifications");
+        mollusk.sysvars.clock.unix_timestamp = 0;
+
+        let sender = Pubkey::new_unique();
+        let receiver = Pubkey::new_unique();
+        let nonce = [12u8; 8];
+
+        let v = super::make_scalar(10);
+        let b = super::make_scalar(20);
+        let c = super::make_scalar(30);
+        let (vx, vy) = super::point_to_xy(&ProjectivePoint::mul_by_generator(&v));
+        let (bx, by) = super::point_to_xy(&ProjectivePoint::mul_by_generator(&b));
+        let c_bytes = super::scalar_to_bytes(&c);
+
+        let (delivery_key, _) = delivery_pda(&program_id, &sender, &nonce);
+        let (vault_key, _) = vault_pda(&program_id, &delivery_key);
+
+        // create at clock=0 → start=0, accept window [0, 3600), cancel opens at 7200
+        let create_result = mollusk.process_instruction(
+            &Instruction::new_with_bytes(
+                program_id,
+                &instruction::CreateDelivery {
+                    receivers: vec![receiver],
+                    vx,
+                    vy,
+                    encrypted_message_hash: vec![],
+                    a: vec![],
+                    term1: 3600,
+                    term2: 7200,
+                    nonce,
+                }
+                .data(),
+                accounts::CreateDelivery {
+                    sender,
+                    delivery: delivery_key,
+                    vault: vault_key,
+                    system_program: system_program::id(),
+                }
+                .to_account_metas(None),
+            ),
+            &[
+                (sender, funded(10 * DELIVERY_DEPOSIT)),
+                (delivery_key, Account::default()),
+                (vault_key, Account::default()),
+                keyed_account_for_system_program(),
+            ],
+        );
+        assert!(!create_result.program_result.is_err(), "create failed");
+
+        // accept at clock=0, within term1
+        let accept_result = mollusk.process_instruction(
+            &Instruction::new_with_bytes(
+                program_id,
+                &instruction::Accept {
+                    z1: vec![],
+                    z2: vec![],
+                    bx,
+                    by,
+                    c: c_bytes,
+                }
+                .data(),
+                accounts::AcceptDelivery {
+                    receiver,
+                    delivery: delivery_key,
+                }
+                .to_account_metas(None),
+            ),
+            &[
+                (receiver, funded(DELIVERY_DEPOSIT)),
+                (
+                    delivery_key,
+                    get_account(&create_result.resulting_accounts, delivery_key),
+                ),
+            ],
+        );
+        assert!(!accept_result.program_result.is_err(), "accept failed");
+
+        // advance clock past start(0) + term2(7200)
+        mollusk.sysvars.clock.unix_timestamp = 8000;
+
+        let cancel_result = mollusk.process_instruction(
+            &Instruction::new_with_bytes(
+                program_id,
+                &instruction::Cancel {}.data(),
+                accounts::CancelDelivery {
+                    receiver,
+                    delivery: delivery_key,
+                }
+                .to_account_metas(None),
+            ),
+            &[
+                (receiver, funded(DELIVERY_DEPOSIT)),
+                (
+                    delivery_key,
+                    get_account(&accept_result.resulting_accounts, delivery_key),
+                ),
+            ],
+        );
+        assert!(!cancel_result.program_result.is_err(), "cancel failed");
+
+        let delivery = parse_delivery(&cancel_result.resulting_accounts, delivery_key);
+        assert_eq!(delivery.receiver_states[0].state, State::Cancelled);
+    }
+
+    #[test]
+    fn test_create_delivery_holds_deposit() {
+        let program_id = solana_notifications::id();
+        let mollusk = Mollusk::new(&program_id, "solana_notifications");
+
+        let sender = Pubkey::new_unique();
+        let receiver = Pubkey::new_unique();
+        let nonce = [13u8; 8];
+
+        let (delivery_key, _) = delivery_pda(&program_id, &sender, &nonce);
+        let (vault_key, _) = vault_pda(&program_id, &delivery_key);
+
+        let result = mollusk.process_instruction(
+            &Instruction::new_with_bytes(
+                program_id,
+                &instruction::CreateDelivery {
+                    receivers: vec![receiver],
+                    vx: [0u8; 32],
+                    vy: [0u8; 32],
+                    encrypted_message_hash: vec![],
+                    a: vec![],
+                    term1: 3600,
+                    term2: 7200,
+                    nonce,
+                }
+                .data(),
+                accounts::CreateDelivery {
+                    sender,
+                    delivery: delivery_key,
+                    vault: vault_key,
+                    system_program: system_program::id(),
+                }
+                .to_account_metas(None),
+            ),
+            &[
+                (sender, funded(10 * DELIVERY_DEPOSIT)),
+                (delivery_key, Account::default()),
+                (vault_key, Account::default()),
+                keyed_account_for_system_program(),
+            ],
+        );
+        assert!(!result.program_result.is_err(), "create failed");
+        assert_eq!(
+            get_lamports(&result.resulting_accounts, vault_key),
+            DELIVERY_DEPOSIT,
+            "vault should hold exactly DELIVERY_DEPOSIT after create"
+        );
+    }
+
+    #[test]
+    fn test_finish_releases_deposit() {
+        let program_id = solana_notifications::id();
+        let mollusk = Mollusk::new(&program_id, "solana_notifications");
+
+        let sender = Pubkey::new_unique();
+        let receiver = Pubkey::new_unique();
+        let nonce = [14u8; 8];
+
+        let v = super::make_scalar(10);
+        let b = super::make_scalar(20);
+        let c = super::make_scalar(30);
+        let r = super::compute_response(&v, &b, &c);
+        let (vx, vy) = super::point_to_xy(&ProjectivePoint::mul_by_generator(&v));
+        let (bx, by) = super::point_to_xy(&ProjectivePoint::mul_by_generator(&b));
+        let c_bytes = super::scalar_to_bytes(&c);
+        let r_bytes = super::scalar_to_bytes(&r);
+
+        let (delivery_key, _) = delivery_pda(&program_id, &sender, &nonce);
+        let (vault_key, _) = vault_pda(&program_id, &delivery_key);
+
+        let create_result = mollusk.process_instruction(
+            &Instruction::new_with_bytes(
+                program_id,
+                &instruction::CreateDelivery {
+                    receivers: vec![receiver],
+                    vx,
+                    vy,
+                    encrypted_message_hash: vec![0u8; 32],
+                    a: vec![],
+                    term1: 3600,
+                    term2: 7200,
+                    nonce,
+                }
+                .data(),
+                accounts::CreateDelivery {
+                    sender,
+                    delivery: delivery_key,
+                    vault: vault_key,
+                    system_program: system_program::id(),
+                }
+                .to_account_metas(None),
+            ),
+            &[
+                (sender, funded(10 * DELIVERY_DEPOSIT)),
+                (delivery_key, Account::default()),
+                (vault_key, Account::default()),
+                keyed_account_for_system_program(),
+            ],
+        );
+        assert!(!create_result.program_result.is_err());
+        assert_eq!(
+            get_lamports(&create_result.resulting_accounts, vault_key),
+            DELIVERY_DEPOSIT
+        );
+
+        let accept_result = mollusk.process_instruction(
+            &Instruction::new_with_bytes(
+                program_id,
+                &instruction::Accept {
+                    z1: vec![0xAA; 32],
+                    z2: vec![0xBB; 32],
+                    bx,
+                    by,
+                    c: c_bytes,
+                }
+                .data(),
+                accounts::AcceptDelivery {
+                    receiver,
+                    delivery: delivery_key,
+                }
+                .to_account_metas(None),
+            ),
+            &[
+                (receiver, funded(DELIVERY_DEPOSIT)),
+                (
+                    delivery_key,
+                    get_account(&create_result.resulting_accounts, delivery_key),
+                ),
+            ],
+        );
+        assert!(!accept_result.program_result.is_err());
+
+        let finish_result = mollusk.process_instruction(
+            &Instruction::new_with_bytes(
+                program_id,
+                &instruction::Finish { r: r_bytes }.data(),
+                accounts::FinishDelivery {
+                    sender,
+                    delivery: delivery_key,
+                    vault: vault_key,
+                    system_program: system_program::id(),
+                }
+                .to_account_metas(None),
+            ),
+            &[
+                (sender, funded(DELIVERY_DEPOSIT)),
+                (
+                    delivery_key,
+                    get_account(&accept_result.resulting_accounts, delivery_key),
+                ),
+                (
+                    vault_key,
+                    get_account(&create_result.resulting_accounts, vault_key),
+                ),
+                keyed_account_for_system_program(),
+            ],
+        );
+        assert!(!finish_result.program_result.is_err(), "finish failed");
+        assert_eq!(
+            get_lamports(&finish_result.resulting_accounts, vault_key),
+            0,
+            "vault should be empty after deposit is returned to sender"
+        );
+    }
+
+    #[test]
+    fn test_create_delivery_fails_when_insufficient_balance() {
+        let program_id = solana_notifications::id();
+        let mollusk = Mollusk::new(&program_id, "solana_notifications");
+
+        let sender = Pubkey::new_unique();
+        let receiver = Pubkey::new_unique();
+        let nonce = [15u8; 8];
+
+        let (delivery_key, _) = delivery_pda(&program_id, &sender, &nonce);
+        let (vault_key, _) = vault_pda(&program_id, &delivery_key);
+
+        let result = mollusk.process_instruction(
+            &Instruction::new_with_bytes(
+                program_id,
+                &instruction::CreateDelivery {
+                    receivers: vec![receiver],
+                    vx: [0u8; 32],
+                    vy: [0u8; 32],
+                    encrypted_message_hash: vec![],
+                    a: vec![],
+                    term1: 3600,
+                    term2: 7200,
+                    nonce,
+                }
+                .data(),
+                accounts::CreateDelivery {
+                    sender,
+                    delivery: delivery_key,
+                    vault: vault_key,
+                    system_program: system_program::id(),
+                }
+                .to_account_metas(None),
+            ),
+            &[
+                (sender, funded(1_000)), // far below DELIVERY_DEPOSIT + rent
+                (delivery_key, Account::default()),
+                (vault_key, Account::default()),
+                keyed_account_for_system_program(),
+            ],
+        );
+        assert!(
+            result.program_result.is_err(),
+            "expected failure with insufficient balance"
+        );
+    }
+
+    #[test]
+    fn test_finish_fails_when_already_finished() {
+        let program_id = solana_notifications::id();
+        let mollusk = Mollusk::new(&program_id, "solana_notifications");
+
+        let sender = Pubkey::new_unique();
+        let receiver = Pubkey::new_unique();
+        let nonce = [16u8; 8];
+
+        let v = super::make_scalar(10);
+        let b = super::make_scalar(20);
+        let c = super::make_scalar(30);
+        let r = super::compute_response(&v, &b, &c);
+        let (vx, vy) = super::point_to_xy(&ProjectivePoint::mul_by_generator(&v));
+        let (bx, by) = super::point_to_xy(&ProjectivePoint::mul_by_generator(&b));
+        let c_bytes = super::scalar_to_bytes(&c);
+        let r_bytes = super::scalar_to_bytes(&r);
+
+        let (delivery_key, _) = delivery_pda(&program_id, &sender, &nonce);
+        let (vault_key, _) = vault_pda(&program_id, &delivery_key);
+
+        let create_result = mollusk.process_instruction(
+            &Instruction::new_with_bytes(
+                program_id,
+                &instruction::CreateDelivery {
+                    receivers: vec![receiver],
+                    vx,
+                    vy,
+                    encrypted_message_hash: vec![0u8; 32],
+                    a: vec![],
+                    term1: 3600,
+                    term2: 7200,
+                    nonce,
+                }
+                .data(),
+                accounts::CreateDelivery {
+                    sender,
+                    delivery: delivery_key,
+                    vault: vault_key,
+                    system_program: system_program::id(),
+                }
+                .to_account_metas(None),
+            ),
+            &[
+                (sender, funded(10 * DELIVERY_DEPOSIT)),
+                (delivery_key, Account::default()),
+                (vault_key, Account::default()),
+                keyed_account_for_system_program(),
+            ],
+        );
+        assert!(!create_result.program_result.is_err());
+
+        let accept_result = mollusk.process_instruction(
+            &Instruction::new_with_bytes(
+                program_id,
+                &instruction::Accept {
+                    z1: vec![0xAA; 32],
+                    z2: vec![0xBB; 32],
+                    bx,
+                    by,
+                    c: c_bytes,
+                }
+                .data(),
+                accounts::AcceptDelivery {
+                    receiver,
+                    delivery: delivery_key,
+                }
+                .to_account_metas(None),
+            ),
+            &[
+                (receiver, funded(DELIVERY_DEPOSIT)),
+                (
+                    delivery_key,
+                    get_account(&create_result.resulting_accounts, delivery_key),
+                ),
+            ],
+        );
+        assert!(!accept_result.program_result.is_err());
+
+        let finish_ix = Instruction::new_with_bytes(
             program_id,
-            &instruction::CreateDelivery {
-                receivers: vec![], // empty → must fail
-                vx: [0u8; 32],
-                vy: [0u8; 32],
-                encrypted_message_hash: vec![],
-                a: vec![],
-                term1: 3600,
-                term2: 7200,
-                nonce,
-            }
-            .data(),
-            accounts::CreateDelivery {
+            &instruction::Finish { r: r_bytes }.data(),
+            accounts::FinishDelivery {
                 sender,
                 delivery: delivery_key,
                 vault: vault_key,
@@ -342,15 +1000,237 @@ mod bpf_tests {
             .to_account_metas(None),
         );
 
+        // first finish succeeds
+        let finish_result = mollusk.process_instruction(
+            &finish_ix,
+            &[
+                (sender, funded(DELIVERY_DEPOSIT)),
+                (
+                    delivery_key,
+                    get_account(&accept_result.resulting_accounts, delivery_key),
+                ),
+                (
+                    vault_key,
+                    get_account(&create_result.resulting_accounts, vault_key),
+                ),
+                keyed_account_for_system_program(),
+            ],
+        );
+        assert!(
+            !finish_result.program_result.is_err(),
+            "first finish should succeed"
+        );
+
+        // second finish must fail with AlreadyFinished
         mollusk.process_and_validate_instruction(
-            &instruction,
-            &[(
-                sender,
-                mollusk_svm::program::keyed_account_for_system_program(),
-            )],
+            &finish_ix,
+            &[
+                (sender, funded(DELIVERY_DEPOSIT)),
+                (
+                    delivery_key,
+                    get_account(&finish_result.resulting_accounts, delivery_key),
+                ),
+                (
+                    vault_key,
+                    get_account(&finish_result.resulting_accounts, vault_key),
+                ),
+                keyed_account_for_system_program(),
+            ],
             &[Check::err(
-                anchor_lang::error::ErrorCode::from(
-                    solana_notifications::SolanaNotificationsError::InvalidReceiversCount,
+                anchor_error(solana_notifications::SolanaNotificationsError::AlreadyFinished)
+                    .into(),
+            )],
+        );
+    }
+
+    #[test]
+    fn test_accept_fails_after_term1_expires() {
+        let program_id = solana_notifications::id();
+        let mut mollusk = Mollusk::new(&program_id, "solana_notifications");
+        mollusk.sysvars.clock.unix_timestamp = 0;
+
+        let sender = Pubkey::new_unique();
+        let receiver = Pubkey::new_unique();
+        let nonce = [17u8; 8];
+
+        let v = super::make_scalar(42);
+        let b = super::make_scalar(20);
+        let c = super::make_scalar(30);
+        let (vx, vy) = super::point_to_xy(&ProjectivePoint::mul_by_generator(&v));
+        let (bx, by) = super::point_to_xy(&ProjectivePoint::mul_by_generator(&b));
+        let c_bytes = super::scalar_to_bytes(&c);
+
+        let (delivery_key, _) = delivery_pda(&program_id, &sender, &nonce);
+        let (vault_key, _) = vault_pda(&program_id, &delivery_key);
+
+        // create at clock=0 → start=0, term1=3600
+        let create_result = mollusk.process_instruction(
+            &Instruction::new_with_bytes(
+                program_id,
+                &instruction::CreateDelivery {
+                    receivers: vec![receiver],
+                    vx,
+                    vy,
+                    encrypted_message_hash: vec![],
+                    a: vec![],
+                    term1: 3600,
+                    term2: 7200,
+                    nonce,
+                }
+                .data(),
+                accounts::CreateDelivery {
+                    sender,
+                    delivery: delivery_key,
+                    vault: vault_key,
+                    system_program: system_program::id(),
+                }
+                .to_account_metas(None),
+            ),
+            &[
+                (sender, funded(10 * DELIVERY_DEPOSIT)),
+                (delivery_key, Account::default()),
+                (vault_key, Account::default()),
+                keyed_account_for_system_program(),
+            ],
+        );
+        assert!(!create_result.program_result.is_err());
+
+        // advance clock past start(0) + term1(3600)
+        mollusk.sysvars.clock.unix_timestamp = 3601;
+
+        mollusk.process_and_validate_instruction(
+            &Instruction::new_with_bytes(
+                program_id,
+                &instruction::Accept {
+                    z1: vec![0xAA; 32],
+                    z2: vec![0xBB; 32],
+                    bx,
+                    by,
+                    c: c_bytes,
+                }
+                .data(),
+                accounts::AcceptDelivery {
+                    receiver,
+                    delivery: delivery_key,
+                }
+                .to_account_metas(None),
+            ),
+            &[
+                (receiver, funded(DELIVERY_DEPOSIT)),
+                (
+                    delivery_key,
+                    get_account(&create_result.resulting_accounts, delivery_key),
+                ),
+            ],
+            &[Check::err(
+                anchor_error(solana_notifications::SolanaNotificationsError::AcceptWindowExpired)
+                    .into(),
+            )],
+        );
+    }
+
+    #[test]
+    fn test_cancel_fails_before_term2_expires() {
+        let program_id = solana_notifications::id();
+        let mut mollusk = Mollusk::new(&program_id, "solana_notifications");
+        mollusk.sysvars.clock.unix_timestamp = 0;
+
+        let sender = Pubkey::new_unique();
+        let receiver = Pubkey::new_unique();
+        let nonce = [18u8; 8];
+
+        let v = super::make_scalar(10);
+        let b = super::make_scalar(20);
+        let c = super::make_scalar(30);
+        let (vx, vy) = super::point_to_xy(&ProjectivePoint::mul_by_generator(&v));
+        let (bx, by) = super::point_to_xy(&ProjectivePoint::mul_by_generator(&b));
+        let c_bytes = super::scalar_to_bytes(&c);
+
+        let (delivery_key, _) = delivery_pda(&program_id, &sender, &nonce);
+        let (vault_key, _) = vault_pda(&program_id, &delivery_key);
+
+        let create_result = mollusk.process_instruction(
+            &Instruction::new_with_bytes(
+                program_id,
+                &instruction::CreateDelivery {
+                    receivers: vec![receiver],
+                    vx,
+                    vy,
+                    encrypted_message_hash: vec![],
+                    a: vec![],
+                    term1: 3600,
+                    term2: 7200,
+                    nonce,
+                }
+                .data(),
+                accounts::CreateDelivery {
+                    sender,
+                    delivery: delivery_key,
+                    vault: vault_key,
+                    system_program: system_program::id(),
+                }
+                .to_account_metas(None),
+            ),
+            &[
+                (sender, funded(10 * DELIVERY_DEPOSIT)),
+                (delivery_key, Account::default()),
+                (vault_key, Account::default()),
+                keyed_account_for_system_program(),
+            ],
+        );
+        assert!(!create_result.program_result.is_err());
+
+        // accept at clock=0, within term1
+        let accept_result = mollusk.process_instruction(
+            &Instruction::new_with_bytes(
+                program_id,
+                &instruction::Accept {
+                    z1: vec![],
+                    z2: vec![],
+                    bx,
+                    by,
+                    c: c_bytes,
+                }
+                .data(),
+                accounts::AcceptDelivery {
+                    receiver,
+                    delivery: delivery_key,
+                }
+                .to_account_metas(None),
+            ),
+            &[
+                (receiver, funded(DELIVERY_DEPOSIT)),
+                (
+                    delivery_key,
+                    get_account(&create_result.resulting_accounts, delivery_key),
+                ),
+            ],
+        );
+        assert!(!accept_result.program_result.is_err());
+
+        // try to cancel at 7199, just before start(0)+term2(7200) → must fail
+        mollusk.sysvars.clock.unix_timestamp = 7199;
+
+        mollusk.process_and_validate_instruction(
+            &Instruction::new_with_bytes(
+                program_id,
+                &instruction::Cancel {}.data(),
+                accounts::CancelDelivery {
+                    receiver,
+                    delivery: delivery_key,
+                }
+                .to_account_metas(None),
+            ),
+            &[
+                (receiver, funded(DELIVERY_DEPOSIT)),
+                (
+                    delivery_key,
+                    get_account(&accept_result.resulting_accounts, delivery_key),
+                ),
+            ],
+            &[Check::err(
+                anchor_error(
+                    solana_notifications::SolanaNotificationsError::CancelWindowNotReached,
                 )
                 .into(),
             )],
