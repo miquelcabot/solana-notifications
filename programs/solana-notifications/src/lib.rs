@@ -133,8 +133,12 @@ pub mod solana_notifications {
         let receiver_key = ctx.accounts.receiver.key();
         let clock = Clock::get()?;
 
+        let accept_deadline = delivery
+            .start
+            .checked_add(delivery.term1)
+            .ok_or(SolanaNotificationsError::InvalidTerms)?;
         require!(
-            clock.unix_timestamp < delivery.start + delivery.term1,
+            clock.unix_timestamp < accept_deadline,
             SolanaNotificationsError::AcceptWindowExpired
         );
 
@@ -156,7 +160,10 @@ pub mod solana_notifications {
         receiver_state.c = c;
         receiver_state.state = State::Accepted;
 
-        delivery.accepted_receivers += 1;
+        delivery.accepted_receivers = delivery
+            .accepted_receivers
+            .checked_add(1)
+            .ok_or(SolanaNotificationsError::InvalidReceiversCount)?;
 
         emit!(ReceiverAccepted {
             delivery: delivery.key(),
@@ -172,14 +179,14 @@ pub mod solana_notifications {
     /// - all receivers have accepted, OR
     /// - the acceptance window (term1) has elapsed.
     ///
-    /// The sender provides `r`. If at least one receiver has accepted, the program
-    /// verifies on-chain that `V == G·r + B·c` (secp256k1) using the first accepted
-    /// receiver's stored (B, c). On success:
+    /// The sender specifies which `receiver`'s (B, c) to use for proof verification
+    /// and provides the response scalar `r`. The program verifies on-chain that
+    /// `V == G·r + B·c` (secp256k1). On success:
     /// - `Accepted` → `Finished` (r is stored in each finished receiver's state),
     /// - `Created`  → `Rejected`.
     ///
     /// The sender's deposit is returned from the vault.
-    pub fn finish(ctx: Context<FinishDelivery>, r: [u8; 32]) -> Result<()> {
+    pub fn finish(ctx: Context<FinishDelivery>, receiver: Pubkey, r: [u8; 32]) -> Result<()> {
         let clock = Clock::get()?;
 
         // --- Immutable validation scope ---
@@ -187,7 +194,11 @@ pub mod solana_notifications {
             let delivery = &ctx.accounts.delivery;
 
             let all_accepted = delivery.accepted_receivers == delivery.receiver_states.len() as u32;
-            let time_passed = clock.unix_timestamp >= delivery.start + delivery.term1;
+            let finish_deadline = delivery
+                .start
+                .checked_add(delivery.term1)
+                .ok_or(SolanaNotificationsError::InvalidTerms)?;
+            let time_passed = clock.unix_timestamp >= finish_deadline;
             require!(
                 all_accepted || time_passed,
                 SolanaNotificationsError::FinishConditionsNotMet
@@ -197,21 +208,21 @@ pub mod solana_notifications {
                 SolanaNotificationsError::AlreadyFinished
             );
 
-            // If any receiver accepted, verify the cryptographic proof for that receiver.
-            if let Some(accepted) = delivery
+            // Verify the cryptographic proof against the specified receiver.
+            let receiver_state = delivery
                 .receiver_states
                 .iter()
-                .find(|rs| rs.state == State::Accepted)
-            {
-                verify_cryptographic_proof(
-                    delivery.vx,
-                    delivery.vy,
-                    accepted.bx,
-                    accepted.by,
-                    accepted.c,
-                    r,
-                )?;
-            }
+                .find(|rs| rs.receiver == receiver && rs.state == State::Accepted)
+                .ok_or(SolanaNotificationsError::ReceiverNotAccepted)?;
+
+            verify_cryptographic_proof(
+                delivery.vx,
+                delivery.vy,
+                receiver_state.bx,
+                receiver_state.by,
+                receiver_state.c,
+                r,
+            )?;
         }
 
         // Save values needed after the mutable borrow
@@ -266,8 +277,12 @@ pub mod solana_notifications {
         let receiver_key = ctx.accounts.receiver.key();
         let clock = Clock::get()?;
 
+        let cancel_deadline = delivery
+            .start
+            .checked_add(delivery.term2)
+            .ok_or(SolanaNotificationsError::InvalidTerms)?;
         require!(
-            clock.unix_timestamp >= delivery.start + delivery.term2,
+            clock.unix_timestamp >= cancel_deadline,
             SolanaNotificationsError::CancelWindowNotReached
         );
 
@@ -579,6 +594,8 @@ pub enum SolanaNotificationsError {
     AlreadyFinished,
     #[msg("Cryptographic verification failed: V != G·r + B·c")]
     VAndGxRiPlusBiXCiNotEqual,
+    #[msg("Specified receiver has not accepted this delivery")]
+    ReceiverNotAccepted,
     #[msg("Cancel window not reached: current time < start + term2")]
     CancelWindowNotReached,
     #[msg("Unauthorized: caller is not the delivery sender")]
