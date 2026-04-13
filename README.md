@@ -81,33 +81,38 @@ Build the program:
 anchor build
 ```
 
-## Build in Debug Mode and Run Tests
+## Build in Debug Mode
 
-During development, you can build and run pure-Rust tests (no BPF binary needed) for faster iteration:
+During development, build in debug mode for faster iteration:
 
 ```sh
 cargo build
 ```
 
-To run the pure-Rust unit tests with output:
+## Running Tests
 
-```sh
-cargo test -- --nocapture
-```
+The test suite is split into two layers:
 
-To run all integration tests against the compiled BPF program:
+| Command | What it runs | Speed |
+|---|---|---|
+| `cargo test` | Pure-Rust tests — cryptographic math, message encryption/decryption, buffer size checks. No BPF binary needed. | Fast (~1 s) |
+| `cargo test-sbf` | **All tests** — compiles the program to BPF, then runs both the pure-Rust tests and the on-chain integration tests (instructions, deposits, state transitions, error paths) inside a Solana VM emulator ([Mollusk](https://github.com/buffalojoec/mollusk)). | Slow (~30–60 s) |
 
-```sh
-cargo test-sbf -- --nocapture
-```
+Use `cargo test` for quick feedback while writing code, and `cargo test-sbf` before committing.
 
-To run a specific test file (e.g. `test_notifications.rs`):
+To run the full test suite with output:
 
 ```sh
 cargo test-sbf --test test_notifications -- --nocapture
 ```
 
-To run the compute-unit benchmarks (prints CU consumption for each instruction):
+To run only the pure-Rust tests:
+
+```sh
+cargo test -- --nocapture
+```
+
+To run the compute-unit benchmarks (prints CU consumption per instruction):
 
 ```sh
 cargo test-sbf --test bench_instructions -- --nocapture
