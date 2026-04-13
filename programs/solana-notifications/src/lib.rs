@@ -368,7 +368,7 @@ fn bytes_to_scalar(bytes: &[u8; 32]) -> Result<k256::Scalar> {
 // ===================== Account Structures =====================
 
 /// State of the delivery process for a single receiver.
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq)]
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq, Debug)]
 pub enum State {
     NotExists,
     Created,
