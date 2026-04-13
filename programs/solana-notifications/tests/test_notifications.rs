@@ -812,7 +812,7 @@ mod bpf_tests {
         let finish_result = mollusk.process_instruction(
             &Instruction::new_with_bytes(
                 program_id,
-                &instruction::Finish { r: r_bytes }.data(),
+                &instruction::Finish { receiver, r: r_bytes }.data(),
                 accounts::FinishDelivery {
                     sender,
                     delivery: delivery_key,
@@ -970,7 +970,7 @@ mod bpf_tests {
 
         let finish_ix = Instruction::new_with_bytes(
             program_id,
-            &instruction::Finish { r: r_bytes }.data(),
+            &instruction::Finish { receiver, r: r_bytes }.data(),
             accounts::FinishDelivery {
                 sender,
                 delivery: delivery_key,
@@ -1318,7 +1318,7 @@ mod bpf_tests {
         let finish_result = mollusk.process_instruction(
             &Instruction::new_with_bytes(
                 program_id,
-                &instruction::Finish { r: r_bytes }.data(),
+                &instruction::Finish { receiver, r: r_bytes }.data(),
                 accounts::FinishDelivery {
                     sender,
                     delivery: delivery_key,

@@ -339,7 +339,7 @@ fn bench_finish() {
     // Step 3: benchmark finish (with real EC verification on-chain)
     let finish_ix = Instruction::new_with_bytes(
         program_id,
-        &instruction::Finish { r: r_bytes }.data(),
+        &instruction::Finish { receiver, r: r_bytes }.data(),
         accounts::FinishDelivery {
             sender,
             delivery: delivery_key,
@@ -617,7 +617,7 @@ fn bench_full_delivery_flow() {
     // ── Step 3: finish ────────────────────────────────────────────────────────
     let finish_ix = Instruction::new_with_bytes(
         program_id,
-        &instruction::Finish { r: r_bytes }.data(),
+        &instruction::Finish { receiver, r: r_bytes }.data(),
         accounts::FinishDelivery {
             sender,
             delivery: delivery_key,

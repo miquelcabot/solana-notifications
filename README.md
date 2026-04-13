@@ -33,12 +33,12 @@ solana-notifications/
 
 ### Instructions
 
-| Instruction       | Description |
-|-------------------|-------------|
+| Instruction | Description |
+| --- | --- |
 | `create_delivery` | Sender creates a delivery, locking a 0.1 SOL deposit in a vault PDA |
-| `accept`          | Receiver accepts within `term1`, submitting a ZKP transcript `(z1, z2, B, c)` |
-| `finish`          | Sender reveals `r` after term1; on-chain verifies `V == G·r + B·c` via secp256k1 |
-| `cancel`          | Receiver cancels their participation after `term2` has elapsed |
+| `accept` | Receiver accepts within `term1`, submitting a ZKP transcript `(z1, z2, B, c)` |
+| `finish` | Sender specifies a receiver and reveals `r`; on-chain verifies `V == G·r + B·c` via secp256k1 |
+| `cancel` | Receiver cancels their participation after `term2` has elapsed |
 
 ### Receiver State Machine
 
