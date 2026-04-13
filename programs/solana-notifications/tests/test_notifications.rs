@@ -37,6 +37,37 @@ fn scalar_to_bytes(s: &Scalar) -> [u8; 32] {
     s.to_bytes().into()
 }
 
+// ===================== Message constants =====================
+// The encryption scheme is C = v XOR message, where v is the 32-byte scalar.
+// The message must therefore be at most 32 bytes.
+
+const MESSAGE: &str = "Message sent";
+const MESSAGE_SHORT: &str = "X";
+const MESSAGE_MAX: &str = "Solana32ByteTestMessage!!!!!!!!!"; // exactly 32 bytes
+
+// ===================== Message helpers =====================
+
+/// Encrypts a message: C = v XOR message (message must be ≤ 32 bytes).
+fn encrypt_message(v: &Scalar, msg: &str) -> Vec<u8> {
+    let v_bytes = v.to_bytes();
+    msg.as_bytes()
+        .iter()
+        .enumerate()
+        .map(|(i, byte)| byte ^ v_bytes[i])
+        .collect()
+}
+
+/// Decrypts a ciphertext: message = C XOR v.
+fn decrypt_message(ciphertext: &[u8], v: &Scalar) -> String {
+    let v_bytes = v.to_bytes();
+    let decrypted: Vec<u8> = ciphertext
+        .iter()
+        .enumerate()
+        .map(|(i, byte)| byte ^ v_bytes[i])
+        .collect();
+    String::from_utf8_lossy(&decrypted).to_string()
+}
+
 // ===================== Pure Rust tests (no BPF needed) =====================
 
 /// Verifies the core ZKP identity V == G·r + B·c across many scalar combinations.
@@ -191,6 +222,59 @@ fn test_finish_crypto_values_are_correct() {
     );
 }
 
+/// Verifies the full encrypt → ZKP → decrypt round-trip for the default message.
+#[test]
+fn test_message_encrypt_decrypt() {
+    let v = make_scalar(10);
+    let b = make_scalar(20);
+    let c = make_scalar(30);
+    let r = compute_response(&v, &b, &c);
+
+    let ciphertext = encrypt_message(&v, MESSAGE);
+    assert_eq!(ciphertext.len(), MESSAGE.len());
+
+    let recovered_v = r + b * c;
+    let decrypted = decrypt_message(&ciphertext, &recovered_v);
+    assert_eq!(decrypted, MESSAGE);
+}
+
+/// Verifies the full encrypt → ZKP → decrypt round-trip for a 1-byte message.
+#[test]
+fn test_message_encrypt_decrypt_short() {
+    let v = make_scalar(10);
+    let b = make_scalar(20);
+    let c = make_scalar(30);
+    let r = compute_response(&v, &b, &c);
+
+    let ciphertext = encrypt_message(&v, MESSAGE_SHORT);
+    assert_eq!(ciphertext.len(), MESSAGE_SHORT.len());
+
+    // Receiver recovers v = r + b·c, then decrypts
+    let recovered_v = r + b * c;
+    let decrypted = decrypt_message(&ciphertext, &recovered_v);
+    assert_eq!(decrypted, MESSAGE_SHORT);
+}
+
+/// Verifies the full encrypt → ZKP → decrypt round-trip for a 32-byte message
+/// (maximum length for the v XOR scheme).
+#[test]
+fn test_message_encrypt_decrypt_max() {
+    assert_eq!(MESSAGE_MAX.len(), 32, "MESSAGE_MAX must be exactly 32 bytes");
+
+    let v = make_scalar(10);
+    let b = make_scalar(20);
+    let c = make_scalar(30);
+    let r = compute_response(&v, &b, &c);
+
+    let ciphertext = encrypt_message(&v, MESSAGE_MAX);
+    assert_eq!(ciphertext.len(), 32);
+
+    // Receiver recovers v = r + b·c, then decrypts
+    let recovered_v = r + b * c;
+    let decrypted = decrypt_message(&ciphertext, &recovered_v);
+    assert_eq!(decrypted, MESSAGE_MAX);
+}
+
 // ===================== BPF-dependent tests =====================
 // Run with: cargo test-sbf   (or: cargo test --features test-sbf)
 
@@ -200,7 +284,10 @@ mod bpf_tests {
         solana_program::{instruction::Instruction, pubkey::Pubkey, system_program},
         AccountDeserialize, InstructionData, ToAccountMetas,
     };
-    use k256::{elliptic_curve::ops::MulByGenerator, ProjectivePoint};
+    use k256::{
+        elliptic_curve::{ops::MulByGenerator, ScalarPrimitive},
+        ProjectivePoint, Scalar,
+    };
     use mollusk_svm::{program::keyed_account_for_system_program, result::Check, Mollusk};
     use solana_account::Account;
     use solana_notifications::{accounts, instruction, Delivery, State, DELIVERY_DEPOSIT};
@@ -480,114 +567,7 @@ mod bpf_tests {
 
     #[test]
     fn test_finish_should_work() {
-        let program_id = solana_notifications::id();
-        let mollusk = Mollusk::new(&program_id, "solana_notifications");
-
-        let sender = Pubkey::new_unique();
-        let receiver = Pubkey::new_unique();
-        let nonce = [11u8; 8];
-
-        let v = super::make_scalar(10);
-        let b = super::make_scalar(20);
-        let c = super::make_scalar(30);
-        let r = super::compute_response(&v, &b, &c);
-        let (vx, vy) = super::point_to_xy(&ProjectivePoint::mul_by_generator(&v));
-        let (bx, by) = super::point_to_xy(&ProjectivePoint::mul_by_generator(&b));
-        let c_bytes = super::scalar_to_bytes(&c);
-        let r_bytes = super::scalar_to_bytes(&r);
-
-        let (delivery_key, _) = delivery_pda(&program_id, &sender, &nonce);
-        let (vault_key, _) = vault_pda(&program_id, &delivery_key);
-
-        let create_result = mollusk.process_instruction(
-            &Instruction::new_with_bytes(
-                program_id,
-                &instruction::CreateDelivery {
-                    receivers: vec![receiver],
-                    vx,
-                    vy,
-                    encrypted_message_hash: vec![0u8; 32],
-                    a: vec![],
-                    term1: 3600,
-                    term2: 7200,
-                    nonce,
-                }
-                .data(),
-                accounts::CreateDelivery {
-                    sender,
-                    delivery: delivery_key,
-                    vault: vault_key,
-                    system_program: system_program::id(),
-                }
-                .to_account_metas(None),
-            ),
-            &[
-                (sender, funded(10 * DELIVERY_DEPOSIT)),
-                (delivery_key, Account::default()),
-                (vault_key, Account::default()),
-                keyed_account_for_system_program(),
-            ],
-        );
-        assert!(!create_result.program_result.is_err(), "create failed");
-
-        let accept_result = mollusk.process_instruction(
-            &Instruction::new_with_bytes(
-                program_id,
-                &instruction::Accept {
-                    z1: vec![0xAA; 32],
-                    z2: vec![0xBB; 32],
-                    bx,
-                    by,
-                    c: c_bytes,
-                }
-                .data(),
-                accounts::AcceptDelivery {
-                    receiver,
-                    delivery: delivery_key,
-                }
-                .to_account_metas(None),
-            ),
-            &[
-                (receiver, funded(DELIVERY_DEPOSIT)),
-                (
-                    delivery_key,
-                    get_account(&create_result.resulting_accounts, delivery_key),
-                ),
-            ],
-        );
-        assert!(!accept_result.program_result.is_err(), "accept failed");
-
-        let finish_result = mollusk.process_instruction(
-            &Instruction::new_with_bytes(
-                program_id,
-                &instruction::Finish { r: r_bytes }.data(),
-                accounts::FinishDelivery {
-                    sender,
-                    delivery: delivery_key,
-                    vault: vault_key,
-                    system_program: system_program::id(),
-                }
-                .to_account_metas(None),
-            ),
-            &[
-                (sender, funded(DELIVERY_DEPOSIT)),
-                (
-                    delivery_key,
-                    get_account(&accept_result.resulting_accounts, delivery_key),
-                ),
-                (
-                    vault_key,
-                    get_account(&create_result.resulting_accounts, vault_key),
-                ),
-                keyed_account_for_system_program(),
-            ],
-        );
-        assert!(!finish_result.program_result.is_err(), "finish failed");
-
-        let delivery = parse_delivery(&finish_result.resulting_accounts, delivery_key);
-        assert!(delivery.finished);
-        assert_eq!(delivery.receiver_states[0].state, State::Finished);
-        assert_eq!(delivery.receiver_states[0].r, r_bytes);
+        run_finish_with_message(super::MESSAGE, [11u8; 8]);
     }
 
     #[test]
@@ -1235,5 +1215,138 @@ mod bpf_tests {
                 .into(),
             )],
         );
+    }
+
+    /// Uses a 1-byte message; verifies the full encrypt → BPF finish → decrypt cycle.
+    #[test]
+    fn test_finish_should_work_short_message() {
+        run_finish_with_message(super::MESSAGE_SHORT, [19u8; 8]);
+    }
+
+    /// Uses a 32-byte message (maximum for the v XOR scheme); verifies full cycle.
+    #[test]
+    fn test_finish_should_work_max_length_message() {
+        assert_eq!(super::MESSAGE_MAX.len(), 32);
+        run_finish_with_message(super::MESSAGE_MAX, [20u8; 8]);
+    }
+
+    /// Shared helper: runs create → accept → finish for a given message string,
+    /// then decrypts the ciphertext off-chain and asserts it matches.
+    fn run_finish_with_message(msg: &str, nonce: [u8; 8]) {
+        let program_id = solana_notifications::id();
+        let mollusk = Mollusk::new(&program_id, "solana_notifications");
+
+        let sender = Pubkey::new_unique();
+        let receiver = Pubkey::new_unique();
+
+        let v = super::make_scalar(10);
+        let b = super::make_scalar(20);
+        let c = super::make_scalar(30);
+        let r = super::compute_response(&v, &b, &c);
+        let (vx, vy) = super::point_to_xy(&ProjectivePoint::mul_by_generator(&v));
+        let (bx, by) = super::point_to_xy(&ProjectivePoint::mul_by_generator(&b));
+        let c_bytes = super::scalar_to_bytes(&c);
+        let r_bytes = super::scalar_to_bytes(&r);
+
+        // Encrypt off-chain: C = v XOR message
+        // The program stores this hash without verifying it, so we pass the
+        // ciphertext itself as the hash (the receiver verifies off-chain).
+        let ciphertext = super::encrypt_message(&v, msg);
+        let encrypted_message_hash = ciphertext.clone();
+
+        let (delivery_key, _) = delivery_pda(&program_id, &sender, &nonce);
+        let (vault_key, _) = vault_pda(&program_id, &delivery_key);
+
+        // create
+        let create_result = mollusk.process_instruction(
+            &Instruction::new_with_bytes(
+                program_id,
+                &instruction::CreateDelivery {
+                    receivers: vec![receiver],
+                    vx,
+                    vy,
+                    encrypted_message_hash,
+                    a: vec![],
+                    term1: 3600,
+                    term2: 7200,
+                    nonce,
+                }
+                .data(),
+                accounts::CreateDelivery {
+                    sender,
+                    delivery: delivery_key,
+                    vault: vault_key,
+                    system_program: system_program::id(),
+                }
+                .to_account_metas(None),
+            ),
+            &[
+                (sender, funded(10 * DELIVERY_DEPOSIT)),
+                (delivery_key, Account::default()),
+                (vault_key, Account::default()),
+                keyed_account_for_system_program(),
+            ],
+        );
+        assert!(!create_result.program_result.is_err(), "create failed");
+
+        // accept
+        let accept_result = mollusk.process_instruction(
+            &Instruction::new_with_bytes(
+                program_id,
+                &instruction::Accept {
+                    z1: vec![0xAA; 32],
+                    z2: vec![0xBB; 32],
+                    bx,
+                    by,
+                    c: c_bytes,
+                }
+                .data(),
+                accounts::AcceptDelivery {
+                    receiver,
+                    delivery: delivery_key,
+                }
+                .to_account_metas(None),
+            ),
+            &[
+                (receiver, funded(DELIVERY_DEPOSIT)),
+                (delivery_key, get_account(&create_result.resulting_accounts, delivery_key)),
+            ],
+        );
+        assert!(!accept_result.program_result.is_err(), "accept failed");
+
+        // finish
+        let finish_result = mollusk.process_instruction(
+            &Instruction::new_with_bytes(
+                program_id,
+                &instruction::Finish { r: r_bytes }.data(),
+                accounts::FinishDelivery {
+                    sender,
+                    delivery: delivery_key,
+                    vault: vault_key,
+                    system_program: system_program::id(),
+                }
+                .to_account_metas(None),
+            ),
+            &[
+                (sender, funded(DELIVERY_DEPOSIT)),
+                (delivery_key, get_account(&accept_result.resulting_accounts, delivery_key)),
+                (vault_key, get_account(&create_result.resulting_accounts, vault_key)),
+                keyed_account_for_system_program(),
+            ],
+        );
+        assert!(!finish_result.program_result.is_err(), "finish failed");
+
+        // Verify receiver state and decrypt the message off-chain
+        let delivery = parse_delivery(&finish_result.resulting_accounts, delivery_key);
+        assert_eq!(delivery.receiver_states[0].state, State::Finished);
+        let r_on_chain = delivery.receiver_states[0].r;
+
+        // Receiver: recover v = r + b·c, then decrypt C XOR v
+        let r_scalar = Scalar::from(ScalarPrimitive::from_slice(&r_on_chain).unwrap());
+        let c_scalar = Scalar::from(ScalarPrimitive::from_slice(&c_bytes).unwrap());
+        let recovered_v = r_scalar + b * c_scalar;
+        let decrypted = super::decrypt_message(&ciphertext, &recovered_v);
+        assert_eq!(decrypted, msg, "decrypted message does not match original");
+        println!("🔓 Decrypted message: {decrypted}");
     }
 }
