@@ -42,6 +42,14 @@ pub mod solana_notifications {
             !receivers.is_empty() && receivers.len() <= MAX_RECEIVERS,
             SolanaNotificationsError::InvalidReceiversCount
         );
+        for i in 0..receivers.len() {
+            for j in (i + 1)..receivers.len() {
+                require!(
+                    receivers[i] != receivers[j],
+                    SolanaNotificationsError::DuplicateReceiver
+                );
+            }
+        }
         require!(
             term1 > 0 && term1 < term2,
             SolanaNotificationsError::InvalidTerms
@@ -570,6 +578,8 @@ pub struct ReceiverCancelled {
 pub enum SolanaNotificationsError {
     #[msg("Number of receivers must be between 1 and MAX_RECEIVERS (10)")]
     InvalidReceiversCount,
+    #[msg("Duplicate receiver in the receivers list")]
+    DuplicateReceiver,
     #[msg("term1 must be positive and strictly less than term2")]
     InvalidTerms,
     #[msg("encrypted_message_hash exceeds 64 bytes")]
