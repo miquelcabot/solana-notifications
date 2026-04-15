@@ -91,32 +91,21 @@ cargo build
 
 ## Running Tests
 
-The test suite is split into two layers:
+All tests (pure-Rust crypto, on-chain instructions, and CU benchmarks) are unified in a single test suite powered by [LiteSVM](https://github.com/LiteSVM/litesvm). LiteSVM loads the compiled `.so` binary and processes full transactions with real keypairs, closely matching validator behaviour.
 
-| Command | What it runs | Speed |
-|---|---|---|
-| `cargo test` | Pure-Rust tests — cryptographic math, message encryption/decryption, buffer size checks. No BPF binary needed. | Fast (~1 s) |
-| `cargo test-sbf` | **All tests** — compiles the program to BPF, then runs both the pure-Rust tests and the on-chain integration tests (instructions, deposits, state transitions, error paths) inside a Solana VM emulator ([Mollusk](https://github.com/buffalojoec/mollusk)). | Slow (~30–60 s) |
-
-Use `cargo test` for quick feedback while writing code, and `cargo test-sbf` before committing.
-
-To run the full test suite with output:
+First, build the program (required once, or after code changes):
 
 ```sh
-cargo test-sbf --test test_notifications -- --nocapture
+anchor build
 ```
 
-To run only the pure-Rust tests:
+Then run the full test suite:
 
 ```sh
 cargo test -- --nocapture
 ```
 
-To run the compute-unit benchmarks (prints CU consumption per instruction):
-
-```sh
-cargo test-sbf --test bench_instructions -- --nocapture
-```
+The CU benchmarks are included in the test output and print compute-unit consumption per instruction.
 
 ## Deploying to a Local Validator
 
