@@ -16,11 +16,7 @@ use k256::{
 use litesvm::LiteSVM;
 use solana_notifications::{accounts, instruction, Delivery, State, DELIVERY_DEPOSIT};
 use solana_sdk::{
-    clock::Clock,
-    instruction::Instruction,
-    pubkey::Pubkey,
-    signature::Keypair,
-    signer::Signer,
+    clock::Clock, instruction::Instruction, pubkey::Pubkey, signature::Keypair, signer::Signer,
     transaction::Transaction,
 };
 
@@ -388,7 +384,11 @@ fn test_message_encrypt_decrypt_short() {
 
 #[test]
 fn test_message_encrypt_decrypt_max() {
-    assert_eq!(MESSAGE_MAX.len(), 32, "MESSAGE_MAX must be exactly 32 bytes");
+    assert_eq!(
+        MESSAGE_MAX.len(),
+        32,
+        "MESSAGE_MAX must be exactly 32 bytes"
+    );
 
     let v = make_scalar(10);
     let b = make_scalar(20);
@@ -731,7 +731,9 @@ fn test_create_delivery_holds_deposit() {
     );
     send_tx(&mut svm, &[ix], &sender, &[&sender]);
 
-    let vault_account = svm.get_account(&vault_key).expect("vault account not found");
+    let vault_account = svm
+        .get_account(&vault_key)
+        .expect("vault account not found");
     assert_eq!(
         vault_account.lamports, DELIVERY_DEPOSIT,
         "vault should hold exactly DELIVERY_DEPOSIT after create"
@@ -803,10 +805,7 @@ fn test_finish_releases_deposit() {
     send_tx(&mut svm, &[finish], &sender, &[&sender]);
 
     // vault should be empty (or gone)
-    let vault_lamports = svm
-        .get_account(&vault_key)
-        .map(|a| a.lamports)
-        .unwrap_or(0);
+    let vault_lamports = svm.get_account(&vault_key).map(|a| a.lamports).unwrap_or(0);
     assert_eq!(
         vault_lamports, 0,
         "vault should be empty after deposit is returned to sender"
